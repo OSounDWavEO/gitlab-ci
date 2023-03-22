@@ -1,0 +1,377 @@
+stages:
+  - test_web
+  - sonarqube_analysis
+  - build_static
+  - build_docker
+  - deployment
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ $MAIN_BRANCH
+
+variables:
+  BUILDER_IMAGE: node:latest
+  MAIN_BRANCH: develop|staging|release/sit|release/uat|master|main
+  STATIC_DIR: build
+
+prepare-scripts:
+  image: alpine/git
+  stage: .pre
+  variables:
+    CI_SCRIPT_REPO: ${CI_SERVER_HOST}/gitlab-ci.git
+  script:
+    - |
+      rm -rf gitlab-ci
+      git clone https://gitlab-ci-token:${API_TOKEN}@${GITLAB_CI_REPO} 
+      cd gitlab-ci && echo $(git show --format="%h %s" --no-patch)
+  cache:
+    key: $CI_COMMIT_REF_SLUG
+    paths:
+      - gitlab-ci
+    when: always
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "merge_request_event"
+
+.install-web-dependency:
+  image: ${BUILDER_IMAGE}
+  before_script:
+    - |
+      LOCK_COUNT=0
+      for LOCK_FILE in yarn.lock package-lock.json pnpm-lock.yaml
+      do
+        if [ -f $LOCK_FILE ]; then
+          echo "found package lock file - $LOCK_FILE"
+          LOCK_COUNT=`expr $LOCK_COUNT + 1`
+        fi
+      done
+
+      if [ $LOCK_COUNT -eq 0 ]; then
+        echo "package lock file not found. cannot build"
+        exit 1
+      fi
+
+      if [ $LOCK_COUNT -gt 1 ]; then
+        echo "found more than one package lock files. package management ambiguous"
+        exit 1
+      fi
+    - echo ${BUILDER_IMAGE}
+    - node -v
+
+install-yarn-dependency:
+  extends: .install-web-dependency
+  stage: .pre
+  script:
+    - yarn config set cache-folder $(pwd)/.yarn
+    - yarn add --dev jest-junit;
+    - yarn install
+  cache:
+    - key:
+        files:
+          - yarn.lock
+      paths:
+        - node_modules
+    - key: yarn-$CI_JOB_IMAGE
+      paths:
+        - .yarn
+  rules:
+    - exists:
+      - yarn.lock
+
+install-npm-dependency:
+  extends: .install-web-dependency
+  stage: .pre
+  script:
+    - npm install --save-dev jest-junit --cache .npm --prefer-offline;
+    - npm install --cache .npm --prefer-offline
+  cache:
+    - key:
+        files:
+          - package-lock.json
+      paths:
+        - node_modules
+    - key: npm-$CI_JOB_IMAGE
+      paths:
+        - .npm
+  rules:
+    - exists:
+      - package-lock.json
+
+install-pnpm-dependency:
+  extends: .install-web-dependency
+  stage: .pre
+  script:
+    - yarn global add pnpm
+    - pnpm config set store-dir $(pwd)/.pnpm-store
+    - pnpm add --save-dev jest-junit
+    - pnpm install
+  cache:
+    - key:
+        files:
+          - pnpm-lock.yaml
+      paths:
+        - node_modules
+    - key: npm-$CI_JOB_IMAGE
+      paths:
+        - .pnpm-store
+  rules:
+    - exists:
+      - pnpm-lock.yaml
+
+.test-web:
+  image: ${BUILDER_IMAGE}
+  artifacts:
+    reports:
+      junit: junit.xml
+      cobertura: coverage/cobertura-coverage.xml
+    paths:
+      - coverage/lcov.info
+    # avaliable in Gitlab 14.10
+    # coverage_report:
+    #   coverage_format: cobertura
+    #   path: coverage/cobertura-coverage.xml
+    expire_in: 1 hour
+    when: always
+  coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'
+
+test-yarn:
+  extends: .test-web
+  stage: test_web
+  needs: [install-yarn-dependency]
+  script:
+    - yarn test --ci --watchAll=false --coverage --reporters=default --reporters=jest-junit --coverageReporters=lcov --coverageReporters=cobertura
+  cache:
+    - key:
+        files:
+          - yarn.lock
+      paths:
+        - node_modules
+      policy: pull
+  rules:
+    - exists:
+      - yarn.lock
+
+test-npm:
+  extends: .test-web
+  stage: test_web
+  needs: [install-npm-dependency]
+  script:
+    - npm run test -- --ci --watchAll=false --coverage --reporters=default --reporters=jest-junit --coverageReporters=lcov --coverageReporters=cobertura
+  cache:
+    - key:
+        files:
+          - package-lock.json
+      paths:
+        - node_modules
+      policy: pull
+  rules:
+    - exists:
+      - package-lock.json
+
+test-pnpm:
+  extends: .test-web
+  stage: test_web
+  needs: [install-pnpm-dependency]
+  before_script:
+    - yarn global add pnpm
+  script:
+    - pnpm test --ci --watchAll=false --coverage --reporters=default --reporters=jest-junit --coverageReporters=lcov --coverageReporters=cobertura
+  cache:
+    - key:
+        files:
+          - pnpm-lock.yaml
+      paths:
+        - node_modules
+      policy: pull
+  rules:
+    - exists:
+      - pnpm-lock.yaml
+
+.sonarqube analysis:
+  stage: sonarqube_analysis
+  image: sonarsource/sonar-scanner-cli:latest
+  needs:
+    - job: test-yarn
+      optional: true
+    - job: test-npm
+      optional: true
+    - job: test-pnpm
+      optional: true
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
+  cache:
+    key: coverage-result
+    paths:
+      - "**/coverage.out"
+      - "**/coverage.xml"
+    policy: pull
+
+sonarqube analysis:
+  extends: .sonarqube analysis
+  script:
+    - sonar-scanner
+      -Dsonar.host.url=${SONAR_URL}
+      -Dsonar.login=${SONAR_LOGIN}
+      -Dsonar.projectVersion=${BUILD_NUMBER}
+      -Dsonar.branch.name=${CI_COMMIT_REF_NAME}
+      -Dsonar.projectKey=${CI_PROJECT_PATH_SLUG}
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "merge_request_event"
+
+sonarqube analysis MR:
+  extends: .sonarqube analysis
+  script:
+    - sonar-scanner
+      -Dsonar.host.url=${SONAR_URL}
+      -Dsonar.login=${SONAR_LOGIN}
+      -Dsonar.projectVersion=${CI_PIPELINE_IID}
+      -Dsonar.pullrequest.key=${CI_MERGE_REQUEST_IID}
+      -Dsonar.pullrequest.branch=${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME}
+      -Dsonar.pullrequest.base=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}
+      -Dsonar.scm.revision=${CI_MERGE_REQUEST_SOURCE_BRANCH_SHA}
+      -Dsonar.pullrequest.gitlab.repositorySlug=${CI_MERGE_REQUEST_PROJECT_ID}
+      -Dsonar.projectKey=${CI_PROJECT_PATH_SLUG}
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+.build-web-static:
+  environment: $CI_COMMIT_REF_SLUG
+  image: ${BUILDER_IMAGE}
+  before_script:
+    - if [ ! -z "$BUILD_ENV" ]; then
+        cat $BUILD_ENV;
+        source $BUILD_ENV;
+      fi
+  artifacts:
+    paths:
+      - ${STATIC_DIR}
+    expire_in: 1 hour
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "merge_request_event"
+
+build-yarn:
+  extends: .build-web-static
+  stage: build_static
+  needs: [test-yarn]
+  script:
+    - yarn build
+  cache:
+    - key:
+        files:
+          - yarn.lock
+      paths:
+        - node_modules
+      policy: pull
+  rules:
+    - exists:
+      - yarn.lock
+
+build-npm:
+  extends: .build-web-static
+  stage: build_static
+  needs: [test-npm]
+  script:
+    - npm run build
+  cache:
+    - key:
+        files:
+          - package-lock.json
+      paths:
+        - node_modules
+      policy: pull
+  rules:
+    - exists:
+      - package-lock.json
+
+build-pnpm:
+  extends: .build-web-static
+  stage: build_static
+  needs: [test-pnpm]
+  before_script:
+    - yarn global add pnpm
+  script:
+    - pnpm run build
+  cache:
+    - key:
+        files:
+          - pnpm-lock.yaml
+      paths:
+        - node_modules
+      policy: pull
+  rules:
+    - exists:
+      - pnpm-lock.yaml
+
+build-docker:
+  image: docker:19.03.15
+  stage: build_docker
+  needs:
+    - job: build-yarn
+      optional: true
+    - job: build-npm
+      optional: true
+    - job: build-pnpm
+      optional: true
+  variables:
+    DOCKERFILE_PATH: Dockerfile
+  before_script:
+    - if [ ! -f ${DOCKERFILE_PATH} ]; then
+        echo "${DOCKERFILE_PATH} not exist, create one"; 
+        if [ ! -d $STATIC_DIR ]; then
+          echo "static files not found"; exit 1;
+        fi;
+        STATIC_DIR=$STATIC_DIR scripts/create-web-dockerfile.sh;
+      else
+        echo -e "\e[33muse local Dockerfile from ${DOCKERFILE_PATH}\e[0m";
+        if [ "${DOCKERFILE_PATH}" != "Dockerfile" ]; then cp -f ${DOCKERFILE_PATH} Dockerfile; fi;
+      fi
+    - more Dockerfile
+    - docker login ${DOCKER_REGISTRY} -u ${DOCKER_USERNAME} -p ${DOCKER_PASSWORD}
+    - DEFAULT_IMAGE_NAME=$(echo "${CI_PROJECT_PATH}" | tr '[:upper:]' '[:lower:]')
+    - IMAGE_NAME="${DOCKER_REGISTRY}/${IMAGE_NAME:-$DEFAULT_IMAGE_NAME}"
+    - DEFAULT_IMAGE_TAG=$(date +%y%m%d)-$CI_COMMIT_BRANCH-$CI_PIPELINE_IID
+    - IMAGE_TAG=${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}
+    - FULL_IMAGE=${IMAGE_NAME}:${IMAGE_TAG}
+  script:
+    - docker build -t ${FULL_IMAGE} .
+    - docker push ${FULL_IMAGE}
+    - echo "FULL_IMAGE=${FULL_IMAGE}" >> build.env
+  artifacts:
+    reports:
+      dotenv: build.env
+  cache:
+    key: $CI_COMMIT_REF_SLUG
+    paths:
+      - gitlab-ci/
+    policy: pull
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "merge_request_event"
+
+deploy:
+  environment: $CI_COMMIT_REF_SLUG
+  image: frolvlad/alpine-bash
+  stage: deployment
+  needs: [build-docker]
+  before_script:
+    - 'which ssh-agent || (apk add --update --no-cache openssh-client)'
+    - mkdir -p ~/.ssh
+    - eval $(ssh-agent -s)
+    - chmod 400 "$SSH_PRIVATE_KEY"
+    - ssh-add "$SSH_PRIVATE_KEY"
+    - '[[ -f /.dockerenv ]] && echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config'
+    - STS_FILE=${K8S_MANIFEST_DIR}/sts-${CI_PROJECT_NAME}.yaml
+  script:
+    - |
+      if ! ssh -q $SSH_CONNECTION stat $STS_FILE \> /dev/null 2\>\&1; then
+        ssh $SSH_CONNECTION "mkdir -p ${K8S_MANIFEST_DIR}"
+        scp scripts/generate_web_k8s_manifest.sh $SSH_CONNECTION:${K8S_MANIFEST_DIR}
+        ssh $SSH_CONNECTION "chmod +x generate_web_k8s_manifest.sh && kubectl apply -f svc-${CI_PROJECT_NAME}.yaml"
+      fi
+    - scp scripts/deploy_web.sh "${SSH_CONNECTION}:"
+    - ssh $SSH_CONNECTION "chmod +x deploy_web.sh && ./deploy_web.sh $STS_FILE $FULL_IMAGE"
+  cache:
+    key: $CI_COMMIT_REF_SLUG
+    paths:
+      - gitlab-ci/
+    policy: pull
+  rules: 
+    - if: $CI_COMMIT_BRANCH =~ $DEPLOY_BRANCH && $CI_PIPELINE_SOURCE != "merge_request_event"
