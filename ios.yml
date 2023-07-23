@@ -1,0 +1,95 @@
+include:
+  - local: jobs/sonarqube.yml
+  - local: jobs/appcenter.yml
+    
+stages:
+  - install_dependencies
+  - test
+  - test_report
+  - build
+  - release
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_REF_PROTECTED == "true"
+
+variable:
+  SCHEME: "PROD"
+  DEVICE: "platform=iOS Simulator,name=iPhone 14"
+  XCODE_CREDENTIALS: "secret"
+
+tags:
+  - mac
+
+install-cocoapod:
+  stage: install_dependencies
+  variables:
+    LC_ALL: "en_US.UTF-8"
+  script:
+    - ruby -v
+    - pod deintegrate
+    - pod install --repo-update
+  artifacts:
+    untracked: true
+
+test:
+  stage: test
+  needs: [install-cocoapod]
+  variables:
+    RUBY_VERSION: "3.2.2"
+  before_script:
+    - if ! command -v xcpretty &> /dev/null; then gem install xcpretty --user-install; fi
+    - if ! command -v slather &> /dev/null; then eval "$(frum init)"; frum local ${RUBY_VERSION}; gem install slather --user-install; fi
+  script:
+    - xcodebuild clean build test -workspace ${CI_PROJECT_NAME}.xcworkspace -scheme ${SCHEME} -destination "${DEVICE}" -configuration -enableCodeCoverage > xcodebuild.log
+    - cat xcodebuild.log | xcpretty -t --report junit
+    - slather coverage --binary-basename "${CI_PROJECT_NAME}" --input-format profdata --cobertura-xml --output-directory sonar-reports --workspace ${CI_PROJECT_NAME}.xcworkspace --scheme ${SCHEME}
+    - mv sonar-reports/cobertura.xml sonar-reports/coverage.xml
+  artifacts:
+    reports:
+      junit: "build/reports/junit.xml"
+      cobertura: "sonar-reports/coverage.xml"
+    paths:
+      - sonar-reports/coverage.xml
+      # coverage_report:
+      #   coverage_format: cobertura
+      #   path: "sonar-reports/cobertura.xml"
+  rules:
+    - if: $DISABLE_TEST != "true"
+
+linter:
+  stage: test
+  image: ghcr.io/realm/swiftlint:latest
+  script:
+    - swiftlint --reporter codeclimate . > swiftlint-report-codeclimate.json || true
+    - swiftlint . > swiftlint-report.txt || true
+  artifacts:
+    reports:
+      codequality: swiftlint-report-codeclimate.json
+    paths:
+      - "swiftlint-report.txt"
+  rules:
+    - if: $DISABLE_TEST != "true"
+  tags:
+    - docker
+
+build:
+  environment: $CI_COMMIT_REF_SLUG
+  stage: build
+  needs:
+    - install cocoapod
+    - job: test
+      optional: true
+  script:
+    - xcodebuild -workspace ${CI_PROJECT_NAME}.xcworkspace -quiet -scheme ${SCHEME} clean archive -allowProvisioningUpdates -destination generic/platform=iOS -archivePath builds/${CI_PROJECT_NAME}.xcarchive
+    - xcodebuild -exportArchive -allowProvisioningUpdates -allowProvisioningDeviceRegistration -archivePath builds/${CI_PROJECT_NAME}.xcarchive -exportPath build -exportOptionsPlist ${XCODE_CREDENTIALS}
+    - APP_PATH=$(find build -name '*.ipa')
+    - echo "APP_PATH=${APP_PATH}"
+    - echo "APP_PATH=${APP_PATH}" >> build.env
+    paths:
+      - build
+    reports:
+      dotenv: build.env
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "merge_request_event"

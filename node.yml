@@ -1,65 +1,61 @@
+include:
+  - local: jobs/sonarqube.yml
+  - local: jobs/build_docker.yml
+
 stages:
-  - test_web
-  - sonarqube_analysis
-  - build_static
+  - install_dependencies
+  - test
+  - test_report
+  - build
   - build_docker
-  - deployment
+  - release
 
 workflow:
   rules:
-    - if: $CI_COMMIT_BRANCH =~ $MAIN_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_REF_PROTECTED == "true"
 
 variables:
   BUILDER_IMAGE: node:latest
-  MAIN_BRANCH: develop|staging|release/sit|release/uat|master|main
   STATIC_DIR: build
 
-prepare-scripts:
-  image: alpine/git
-  stage: .pre
-  variables:
-    CI_SCRIPT_REPO: ${CI_SERVER_HOST}/gitlab-ci.git
-  script:
-    - |
-      rm -rf gitlab-ci
-      git clone https://gitlab-ci-token:${API_TOKEN}@${GITLAB_CI_REPO} 
-      cd gitlab-ci && echo $(git show --format="%h %s" --no-patch)
-  cache:
-    key: $CI_COMMIT_REF_SLUG
-    paths:
-      - gitlab-ci
-    when: always
-  rules:
-    - if: $CI_PIPELINE_SOURCE != "merge_request_event"
-
-.install-web-dependency:
+.builder:
   image: ${BUILDER_IMAGE}
-  before_script:
+
+check-package-manager:
+  image: alpine
+  stage: .pre
+  script:
+    - LOCK_COUNT=0
     - |
-      LOCK_COUNT=0
       for LOCK_FILE in yarn.lock package-lock.json pnpm-lock.yaml
       do
-        if [ -f $LOCK_FILE ]; then
-          echo "found package lock file - $LOCK_FILE"
+        if [ -f ${LOCK_FILE} ]; then
+          echo "found package lock file - ${LOCK_FILE}"
           LOCK_COUNT=`expr $LOCK_COUNT + 1`
         fi
       done
-
-      if [ $LOCK_COUNT -eq 0 ]; then
+    - |
+      if [ ${LOCK_COUNT} -eq 0 ]; then
         echo "package lock file not found. cannot build"
         exit 1
       fi
-
-      if [ $LOCK_COUNT -gt 1 ]; then
+    - |
+      if [ ${LOCK_COUNT} -gt 1 ]; then
         echo "found more than one package lock files. package management ambiguous"
         exit 1
       fi
-    - echo ${BUILDER_IMAGE}
-    - node -v
+
+.install-web-dependency:
+  stage: install_dependencies
+  extends: .builder
+  needs: [check-package-manager]
+  before_script:
+    - 'echo "Builder image: ${BUILDER_IMAGE}"'
+    - 'echo "Node version: $(node -v)"'
 
 install-yarn-dependency:
   extends: .install-web-dependency
-  stage: .pre
   script:
     - yarn config set cache-folder $(pwd)/.yarn
     - yarn add --dev jest-junit;
@@ -79,7 +75,6 @@ install-yarn-dependency:
 
 install-npm-dependency:
   extends: .install-web-dependency
-  stage: .pre
   script:
     - npm install --save-dev jest-junit --cache .npm --prefer-offline;
     - npm install --cache .npm --prefer-offline
@@ -98,7 +93,6 @@ install-npm-dependency:
 
 install-pnpm-dependency:
   extends: .install-web-dependency
-  stage: .pre
   script:
     - yarn global add pnpm
     - pnpm config set store-dir $(pwd)/.pnpm-store
@@ -118,7 +112,11 @@ install-pnpm-dependency:
       - pnpm-lock.yaml
 
 .test-web:
-  image: ${BUILDER_IMAGE}
+  stage: test
+  extends: .builder
+  before_script:
+    - 'echo "Builder image: ${BUILDER_IMAGE}"'
+    - 'echo "Node version: $(node -v)"'
   artifacts:
     reports:
       junit: junit.xml
@@ -135,7 +133,6 @@ install-pnpm-dependency:
 
 test-yarn:
   extends: .test-web
-  stage: test_web
   needs: [install-yarn-dependency]
   script:
     - yarn test --ci --watchAll=false --coverage --reporters=default --reporters=jest-junit --coverageReporters=lcov --coverageReporters=cobertura
@@ -147,12 +144,12 @@ test-yarn:
         - node_modules
       policy: pull
   rules:
+    - if: $DISABLE_TEST != "true"
     - exists:
       - yarn.lock
 
 test-npm:
   extends: .test-web
-  stage: test_web
   needs: [install-npm-dependency]
   script:
     - npm run test -- --ci --watchAll=false --coverage --reporters=default --reporters=jest-junit --coverageReporters=lcov --coverageReporters=cobertura
@@ -164,16 +161,15 @@ test-npm:
         - node_modules
       policy: pull
   rules:
+    - if: $DISABLE_TEST != "true"
     - exists:
       - package-lock.json
 
 test-pnpm:
   extends: .test-web
-  stage: test_web
   needs: [install-pnpm-dependency]
-  before_script:
-    - yarn global add pnpm
   script:
+    - yarn global add pnpm
     - pnpm test --ci --watchAll=false --coverage --reporters=default --reporters=jest-junit --coverageReporters=lcov --coverageReporters=cobertura
   cache:
     - key:
@@ -183,12 +179,12 @@ test-pnpm:
         - node_modules
       policy: pull
   rules:
+    - if: $DISABLE_TEST != "true"
     - exists:
       - pnpm-lock.yaml
 
-.sonarqube analysis:
-  stage: sonarqube_analysis
-  image: sonarsource/sonar-scanner-cli:latest
+sonarqube-analysis-branch:
+  extends: .sonarqube-analysis-brnach
   needs:
     - job: test-yarn
       optional: true
@@ -196,50 +192,27 @@ test-pnpm:
       optional: true
     - job: test-pnpm
       optional: true
-  variables:
-    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
-  cache:
-    key: coverage-result
-    paths:
-      - "**/coverage.out"
-      - "**/coverage.xml"
-    policy: pull
 
-sonarqube analysis:
-  extends: .sonarqube analysis
-  script:
-    - sonar-scanner
-      -Dsonar.host.url=${SONAR_URL}
-      -Dsonar.login=${SONAR_LOGIN}
-      -Dsonar.projectVersion=${BUILD_NUMBER}
-      -Dsonar.branch.name=${CI_COMMIT_REF_NAME}
-      -Dsonar.projectKey=${CI_PROJECT_PATH_SLUG}
-  rules:
-    - if: $CI_PIPELINE_SOURCE != "merge_request_event"
-
-sonarqube analysis MR:
-  extends: .sonarqube analysis
-  script:
-    - sonar-scanner
-      -Dsonar.host.url=${SONAR_URL}
-      -Dsonar.login=${SONAR_LOGIN}
-      -Dsonar.projectVersion=${CI_PIPELINE_IID}
-      -Dsonar.pullrequest.key=${CI_MERGE_REQUEST_IID}
-      -Dsonar.pullrequest.branch=${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME}
-      -Dsonar.pullrequest.base=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}
-      -Dsonar.scm.revision=${CI_MERGE_REQUEST_SOURCE_BRANCH_SHA}
-      -Dsonar.pullrequest.gitlab.repositorySlug=${CI_MERGE_REQUEST_PROJECT_ID}
-      -Dsonar.projectKey=${CI_PROJECT_PATH_SLUG}
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+sonarqube analysis mr:
+  extends: .sonarqube-analysis-mr
+  needs:
+    - job: test-yarn
+      optional: true
+    - job: test-npm
+      optional: true
+    - job: test-pnpm
+      optional: true
 
 .build-web-static:
   environment: $CI_COMMIT_REF_SLUG
-  image: ${BUILDER_IMAGE}
+  stage: build
+  extends: .builder
   before_script:
-    - if [ ! -z "$BUILD_ENV" ]; then
-        cat $BUILD_ENV;
-        source $BUILD_ENV;
+    - 'echo "Builder image: ${BUILDER_IMAGE}"'
+    - 'echo "Node version: $(node -v)"'
+    - if [ ! -z "${BUILD_ENV}" ]; then
+        cat ${BUILD_ENV};
+        source ${BUILD_ENV};
       fi
   artifacts:
     paths:
@@ -250,8 +223,9 @@ sonarqube analysis MR:
 
 build-yarn:
   extends: .build-web-static
-  stage: build_static
-  needs: [test-yarn]
+  needs:
+    - job: test-yarn
+      optional: true
   script:
     - yarn build
   cache:
@@ -267,8 +241,9 @@ build-yarn:
 
 build-npm:
   extends: .build-web-static
-  stage: build_static
-  needs: [test-npm]
+  needs:
+    - job: test-bpm
+      optional: true
   script:
     - npm run build
   cache:
@@ -284,11 +259,11 @@ build-npm:
 
 build-pnpm:
   extends: .build-web-static
-  stage: build_static
-  needs: [test-pnpm]
-  before_script:
-    - yarn global add pnpm
+  needs:
+    - job: test-pnpm
+      optional: true
   script:
+    - yarn global add pnpm
     - pnpm run build
   cache:
     - key:
@@ -302,8 +277,7 @@ build-pnpm:
       - pnpm-lock.yaml
 
 build-docker:
-  image: docker:19.03.15
-  stage: build_docker
+  extends: .build-docker
   needs:
     - job: build-yarn
       optional: true
@@ -311,67 +285,39 @@ build-docker:
       optional: true
     - job: build-pnpm
       optional: true
-  variables:
-    DOCKERFILE_PATH: Dockerfile
   before_script:
     - if [ ! -f ${DOCKERFILE_PATH} ]; then
-        echo "${DOCKERFILE_PATH} not exist, create one"; 
-        if [ ! -d $STATIC_DIR ]; then
+        echo "${DOCKERFILE_PATH} not exist, create one";
+        if [ ! -d ${STATIC_DIR} ]; then
           echo "static files not found"; exit 1;
         fi;
-        STATIC_DIR=$STATIC_DIR scripts/create-web-dockerfile.sh;
+        STATIC_DIR=${STATIC_DIR} scripts/create-web-dockerfile.sh;
       else
         echo -e "\e[33muse local Dockerfile from ${DOCKERFILE_PATH}\e[0m";
         if [ "${DOCKERFILE_PATH}" != "Dockerfile" ]; then cp -f ${DOCKERFILE_PATH} Dockerfile; fi;
       fi
-    - more Dockerfile
-    - docker login ${DOCKER_REGISTRY} -u ${DOCKER_USERNAME} -p ${DOCKER_PASSWORD}
-    - DEFAULT_IMAGE_NAME=$(echo "${CI_PROJECT_PATH}" | tr '[:upper:]' '[:lower:]')
-    - IMAGE_NAME="${DOCKER_REGISTRY}/${IMAGE_NAME:-$DEFAULT_IMAGE_NAME}"
-    - DEFAULT_IMAGE_TAG=$(date +%y%m%d)-$CI_COMMIT_BRANCH-$CI_PIPELINE_IID
-    - IMAGE_TAG=${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}
-    - FULL_IMAGE=${IMAGE_NAME}:${IMAGE_TAG}
-  script:
-    - docker build -t ${FULL_IMAGE} .
-    - docker push ${FULL_IMAGE}
-    - echo "FULL_IMAGE=${FULL_IMAGE}" >> build.env
-  artifacts:
-    reports:
-      dotenv: build.env
-  cache:
-    key: $CI_COMMIT_REF_SLUG
-    paths:
-      - gitlab-ci/
-    policy: pull
-  rules:
-    - if: $CI_PIPELINE_SOURCE != "merge_request_event"
 
 deploy:
   environment: $CI_COMMIT_REF_SLUG
-  image: frolvlad/alpine-bash
-  stage: deployment
+  stage: release
+  image: alpine
   needs: [build-docker]
   before_script:
     - 'which ssh-agent || (apk add --update --no-cache openssh-client)'
     - mkdir -p ~/.ssh
     - eval $(ssh-agent -s)
-    - chmod 400 "$SSH_PRIVATE_KEY"
-    - ssh-add "$SSH_PRIVATE_KEY"
+    - chmod 400 "${SSH_PRIVATE_KEY}"
+    - ssh-add "${SSH_PRIVATE_KEY}"
     - '[[ -f /.dockerenv ]] && echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config'
-    - STS_FILE=${K8S_MANIFEST_DIR}/sts-${CI_PROJECT_NAME}.yaml
+    - STS_FILE=${K8S_MANIFEST_DIR}/sts-${CI_PROJECT_NAME}.yml
   script:
     - |
-      if ! ssh -q $SSH_CONNECTION stat $STS_FILE \> /dev/null 2\>\&1; then
-        ssh $SSH_CONNECTION "mkdir -p ${K8S_MANIFEST_DIR}"
-        scp scripts/generate_web_k8s_manifest.sh $SSH_CONNECTION:${K8S_MANIFEST_DIR}
-        ssh $SSH_CONNECTION "chmod +x generate_web_k8s_manifest.sh && kubectl apply -f svc-${CI_PROJECT_NAME}.yaml"
+      if ! ssh -q ${SSH_CONNECTION} stat ${STS_FILE} \> /dev/null 2\>\&1; then
+        ssh ${SSH_CONNECTION} "mkdir -p ${K8S_MANIFEST_DIR}"
+        scp scripts/generate_web_k8s_manifest.sh ${SSH_CONNECTION}:${K8S_MANIFEST_DIR}
+        ssh ${SSH_CONNECTION} "chmod +x generate_web_k8s_manifest.sh && kubectl apply -f svc-${CI_PROJECT_NAME}.yml"
       fi
     - scp scripts/deploy_web.sh "${SSH_CONNECTION}:"
-    - ssh $SSH_CONNECTION "chmod +x deploy_web.sh && ./deploy_web.sh $STS_FILE $FULL_IMAGE"
-  cache:
-    key: $CI_COMMIT_REF_SLUG
-    paths:
-      - gitlab-ci/
-    policy: pull
+    - ssh ${SSH_CONNECTION} "chmod +x deploy_web.sh && ./deploy_web.sh ${STS_FILE} ${FULL_IMAGE}"
   rules: 
-    - if: $CI_COMMIT_BRANCH =~ $DEPLOY_BRANCH && $CI_PIPELINE_SOURCE != "merge_request_event"
+    - if: $CI_COMMIT_BRANCH =~ $DEPLOY_BRANCH && $CI_PIPELINE_SOURCE != "merge_request_event" && $DISABLE_PUSH != "true"

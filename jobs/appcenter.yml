@@ -1,0 +1,12 @@
+release:
+  environment: $CI_COMMIT_REF_SLUG
+  stage: release
+  image: node
+  needs: [build]
+  before_script:
+    - if ! command -v appcenter &> /dev/null; then npm install -g appcenter-cli; fi
+  script:
+    # login appcenter here
+    - appcenter distribute release --app ${APP_NAME} --file ${APP_PATH} --group "${RELEASE_GROUP}"
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "merge_request_event" && $DISABLE_PUSH != "true"

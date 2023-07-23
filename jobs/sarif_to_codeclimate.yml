@@ -1,0 +1,29 @@
+sarif-to-codeclimate:
+  image: rust:alpine
+  needs: [linter]
+  stage: test_report
+  before_script:
+    - if [ ! -f sarif_to_codequality ]; then
+        apk add --no-cache git musl-dev;
+        git clone https://gitlab.com/ahogen/sarif-to-codequality.git;
+        cd sarif-to-codequality;
+        cargo build --release;
+        cd ..;
+        mv sarif-to-codequality/target/release/sarif_to_codequality .;
+        chmod a+x sarif_to_codequality;
+      fi;
+    - apk add --no-cache jq
+  script:
+    - ./sarif_to_codequality -i ktlint-report-sarif.json -o ktlint-report-temp.json
+    - jq '.[].location|=((.lines.begin = .line)|(.path = .path[2:]))' ktlint-report-temp.json > ktlint-report.json
+  artifacts:
+    reports:
+      codequality: ktlint-report.json
+  cache:
+    key:
+      files:
+        - sarif_to_codequality
+    paths:
+      - sarif_to_codequality
+  rules:
+    - if: $DISABLE_UNITTEST != "true"

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-cat <<EOT >> sts-${CI_PROJECT_NAME}.yaml
+cat <<EOT >> sts-${CI_PROJECT_NAME}.yml
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -21,7 +21,7 @@ spec:
     metadata:
       creationTimestamp: null
       labels:
-        app: ${CI_PROJECT_NAME-web
+        app: ${CI_PROJECT_NAME}-web
     spec:
       containers:
       - env:
@@ -57,7 +57,7 @@ spec:
     type: RollingUpdate
 EOT
 
-cat <<EOT >> svc-${CI_PROJECT_NAME}.yaml
+cat <<EOT >> svc-${CI_PROJECT_NAME}.yml
 apiVersion: v1
 kind: Service
 metadata:

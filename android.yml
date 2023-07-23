@@ -1,0 +1,89 @@
+include:
+  - local: jobs/sarif_to_codeclimate.yml
+  - local: jobs/sonarqube.yml
+  - local: jobs/appcenter.yml
+
+stages:
+  - test
+  - test_report
+  - build
+  - release
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_REF_PROTECTED == "true"
+
+variable:
+  BUILDER_IMAGE: mobiledevops/android-sdk-image
+  BUILD_MODE: Debug
+
+.builder:
+  image: ${BUILDER_IMAGE}
+  before_script:
+    - 'echo "Builder image: ${BUILDER_IMAGE}"'
+    - 'echo "Android SDK manager version: $(sdkmanager --version)"'
+    - 'echo "Android SDK root: ${ANDROID_SDK_ROOT}"'
+
+test:
+  stage: test
+  extends: .builder
+    - ./gradlew clean testDebugUnitTest --stacktrace
+  rules:
+    - if: $DISABLE_TEST != "true"
+
+functional test:
+  stage: test
+  extends: .builder
+  script:
+    - if [ ! -f android-wait-for-emulator ]; then
+        wget --output-document android-wait-for-emulator https://raw.githubusercontent.com/travis-ci/travis-cookbooks/0f497eb71291b52a703143c5cd63a217c8766dc9/community-cookbooks/android-sdk/files/default/android-wait-for-emulator;
+        chmod +x android-wait-for-emulator;
+      fi
+    - ${ANDROID_SDK_ROOT}/emulator/emulator -avd test -no-snapshot -no-snapshot-load -no-audio -wipe-data -no-window -gpu swiftshader_indirect &
+    - EMULATOR_PID=$!
+    - ./android-wait-for-emulator
+    - adb shell input keyevent 82
+    - ./gradlew cAT --stacktrace || EXIT_CODE=$?
+    - kill ${EMULATOR_PID}
+    - if [ ${EXIT_CODE} -ne 0 ]; then echo "Failed test!"; exit ${EXIT_CODE}; fi;
+  cache:
+    - key: 
+        files:
+          - android-wait-for-emulator
+      paths:
+        - android-wait-for-emulator
+  rules:
+    - if: $DISABLE_TEST != "true"
+
+linter:
+  image: kkopper/ktlint
+  stage: test
+  script:
+    - ktlint --relative --reporter=sarif,output=ktlint-report-sarif.json || true
+  artifacts:
+    paths:
+      - ktlint-report-sarif.json
+  rules:
+    - if: $DISABLE_TEST != "true"
+
+build:
+  stage: build
+  extends: .builder
+  needs: 
+    - job: test
+      optional: true
+    - job: functional test
+      optional: true
+  script:
+    - ./gradlew clean assemble${BUILD_MODE}
+    - APP_PATH=$(find app/build/outputs -name '*.apk')
+    - 'echo "APP_PATH: ${APP_PATH}"'
+    - echo "APP_PATH=${APP_PATH}" >> build.env
+  artifacts:
+    paths:
+      - app/build/outputs/
+    reports:
+      dotenv: build.env
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "merge_request_event"

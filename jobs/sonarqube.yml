@@ -1,0 +1,33 @@
+.sonarqube-analysis:
+  stage: test_report
+  image: sonarsource/sonar-scanner-cli:latest
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
+
+.sonarqube analysis branch:
+  extends: .sonarqube-analysis
+  script:
+    - sonar-scanner
+      -Dsonar.host.url=${SONAR_URL}
+      -Dsonar.login=${SONAR_LOGIN}
+      -Dsonar.projectVersion=${BUILD_NUMBER}
+      -Dsonar.branch.name=${CI_COMMIT_REF_NAME}
+      -Dsonar.projectKey=${CI_PROJECT_PATH_SLUG}
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "merge_request_event"
+
+.sonarqube-analysis-mr:
+  extends: .sonarqube-analysis
+  script:
+    - sonar-scanner
+      -Dsonar.host.url=${SONAR_URL}
+      -Dsonar.login=${SONAR_LOGIN}
+      -Dsonar.projectVersion=${CI_PIPELINE_IID}
+      -Dsonar.pullrequest.key=${CI_MERGE_REQUEST_IID}
+      -Dsonar.pullrequest.branch=${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME}
+      -Dsonar.pullrequest.base=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}
+      -Dsonar.scm.revision=${CI_MERGE_REQUEST_SOURCE_BRANCH_SHA}
+      -Dsonar.pullrequest.gitlab.repositorySlug=${CI_MERGE_REQUEST_PROJECT_ID}
+      -Dsonar.projectKey=${CI_PROJECT_PATH_SLUG}
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
