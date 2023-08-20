@@ -7,5 +7,5 @@ FROM ${RUNNER_IMAGE}
 WORKDIR /opt/app
 COPY ${OUTPUT} /opt/app/
 
-CMD ["./${CI_PROJECT_NAME}"]
+ENTRYPOINT ["java","-jar","/opt/app/${CI_PROJECT_NAME}-1.0.0-SNAPSHOT.jar"]  
 EOT

@@ -2,9 +2,9 @@
 set -e
  
 cat <<EOT > Dockerfile
-FROM nginx:latest
+FROM ${RUNNER_IMAGE}
 
 COPY files/default.conf /etc/nginx/conf.d/default.conf
 
-COPY ${STATIC_DIR} /usr/share/nginx/html
+COPY ${OUTPUT} /usr/share/nginx/html
 EOT

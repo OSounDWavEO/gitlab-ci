@@ -3,14 +3,6 @@
   stage: build_docker
   variables:
     DOCKERFILE_PATH: Dockerfile
-  before_script:
-    - if [ ! -f ${DOCKERFILE_PATH} ]; then
-        echo "${DOCKERFILE_PATH} not exist, create one";
-        scripts/create-go-dockerfile.sh;
-      else
-        echo -e "\e[33muse local Dockerfile from ${DOCKERFILE_PATH}\e[0m";
-        if [ "${DOCKERFILE_PATH}" != "Dockerfile" ]; then cp -f ${DOCKERFILE_PATH} Dockerfile; fi;
-      fi
   script:
     - more Dockerfile
     - docker login ${DOCKER_REGISTRY} -u ${DOCKER_USERNAME} -p ${DOCKER_PASSWORD}

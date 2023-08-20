@@ -85,8 +85,9 @@ build:
     - xcodebuild -workspace ${CI_PROJECT_NAME}.xcworkspace -quiet -scheme ${SCHEME} clean archive -allowProvisioningUpdates -destination generic/platform=iOS -archivePath builds/${CI_PROJECT_NAME}.xcarchive
     - xcodebuild -exportArchive -allowProvisioningUpdates -allowProvisioningDeviceRegistration -archivePath builds/${CI_PROJECT_NAME}.xcarchive -exportPath build -exportOptionsPlist ${XCODE_CREDENTIALS}
     - APP_PATH=$(find build -name '*.ipa')
-    - echo "APP_PATH=${APP_PATH}"
+    - 'echo "APP_PATH: ${APP_PATH}"'
     - echo "APP_PATH=${APP_PATH}" >> build.env
+  artifacts:
     paths:
       - build
     reports:

@@ -17,10 +17,14 @@ workflow:
 
 variables:
   BUILDER_IMAGE: node:latest
-  STATIC_DIR: build
+  RUNNER_IMAGE: nginx:latest
+  OUTPUT: build
 
 .builder:
   image: ${BUILDER_IMAGE}
+  before_script:
+    - 'echo "Builder image: ${BUILDER_IMAGE}"'
+    - 'echo "Node version: $(node -v)"'
 
 check-package-manager:
   image: alpine
@@ -50,9 +54,6 @@ check-package-manager:
   stage: install_dependencies
   extends: .builder
   needs: [check-package-manager]
-  before_script:
-    - 'echo "Builder image: ${BUILDER_IMAGE}"'
-    - 'echo "Node version: $(node -v)"'
 
 install-yarn-dependency:
   extends: .install-web-dependency
@@ -114,9 +115,6 @@ install-pnpm-dependency:
 .test-web:
   stage: test
   extends: .builder
-  before_script:
-    - 'echo "Builder image: ${BUILDER_IMAGE}"'
-    - 'echo "Node version: $(node -v)"'
   artifacts:
     reports:
       junit: junit.xml
@@ -145,7 +143,7 @@ test-yarn:
       policy: pull
   rules:
     - if: $DISABLE_TEST != "true"
-    - exists:
+      exists:
       - yarn.lock
 
 test-npm:
@@ -162,7 +160,7 @@ test-npm:
       policy: pull
   rules:
     - if: $DISABLE_TEST != "true"
-    - exists:
+      exists:
       - package-lock.json
 
 test-pnpm:
@@ -180,7 +178,7 @@ test-pnpm:
       policy: pull
   rules:
     - if: $DISABLE_TEST != "true"
-    - exists:
+      exists:
       - pnpm-lock.yaml
 
 sonarqube-analysis-branch:
@@ -207,19 +205,10 @@ sonarqube analysis mr:
   environment: $CI_COMMIT_REF_SLUG
   stage: build
   extends: .builder
-  before_script:
-    - 'echo "Builder image: ${BUILDER_IMAGE}"'
-    - 'echo "Node version: $(node -v)"'
-    - if [ ! -z "${BUILD_ENV}" ]; then
-        cat ${BUILD_ENV};
-        source ${BUILD_ENV};
-      fi
   artifacts:
     paths:
-      - ${STATIC_DIR}
-    expire_in: 1 hour
-  rules:
-    - if: $CI_PIPELINE_SOURCE != "merge_request_event"
+      - ${OUTPUT}
+    expire_in: 1 days
 
 build-yarn:
   extends: .build-web-static
@@ -227,6 +216,10 @@ build-yarn:
     - job: test-yarn
       optional: true
   script:
+    - if [ ! -z "${BUILD_ENV}" ]; then
+        cat ${BUILD_ENV};
+        source ${BUILD_ENV};
+      fi
     - yarn build
   cache:
     - key:
@@ -236,7 +229,8 @@ build-yarn:
         - node_modules
       policy: pull
   rules:
-    - exists:
+    - if: $CI_PIPELINE_SOURCE != "merge_request_event"
+      exists:
       - yarn.lock
 
 build-npm:
@@ -245,6 +239,10 @@ build-npm:
     - job: test-bpm
       optional: true
   script:
+    - if [ ! -z "${BUILD_ENV}" ]; then
+        cat ${BUILD_ENV};
+        source ${BUILD_ENV};
+      fi
     - npm run build
   cache:
     - key:
@@ -254,7 +252,8 @@ build-npm:
         - node_modules
       policy: pull
   rules:
-    - exists:
+    - if: $CI_PIPELINE_SOURCE != "merge_request_event"
+      exists:
       - package-lock.json
 
 build-pnpm:
@@ -263,6 +262,10 @@ build-pnpm:
     - job: test-pnpm
       optional: true
   script:
+    - if [ ! -z "${BUILD_ENV}" ]; then
+        cat ${BUILD_ENV};
+        source ${BUILD_ENV};
+      fi
     - yarn global add pnpm
     - pnpm run build
   cache:
@@ -273,7 +276,8 @@ build-pnpm:
         - node_modules
       policy: pull
   rules:
-    - exists:
+    - if: $CI_PIPELINE_SOURCE != "merge_request_event"
+      exists:
       - pnpm-lock.yaml
 
 build-docker:
@@ -288,10 +292,7 @@ build-docker:
   before_script:
     - if [ ! -f ${DOCKERFILE_PATH} ]; then
         echo "${DOCKERFILE_PATH} not exist, create one";
-        if [ ! -d ${STATIC_DIR} ]; then
-          echo "static files not found"; exit 1;
-        fi;
-        STATIC_DIR=${STATIC_DIR} scripts/create-web-dockerfile.sh;
+        scripts/create_web_dockerfile.sh;
       else
         echo -e "\e[33muse local Dockerfile from ${DOCKERFILE_PATH}\e[0m";
         if [ "${DOCKERFILE_PATH}" != "Dockerfile" ]; then cp -f ${DOCKERFILE_PATH} Dockerfile; fi;

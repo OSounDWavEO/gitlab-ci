@@ -16,6 +16,7 @@ workflow:
 variables:
   BUILDER_IMAGE: golang:latest
   RUNNER_IMAGE: alpine
+  OUTPUT: bin
 
 .builder:
   image: ${BUILDER_IMAGE}
@@ -66,10 +67,18 @@ sonarqube analysis mr:
 
 build:
   stage: build
-  extends: .builder
+  image: ${BUILDER_IMAGE}
   needs:
     - job: test
       optional: true
+  variables:
+    GOPATH: $CI_PROJECT_DIR/.go
+  before_script:
+    - mkdir -p .go
+    - export PATH=${GOPATH}/bin:${PATH}
+    - 'echo "Builder image: ${BUILDER_IMAGE}"'
+    - 'echo "Go version: $(go version)"'
+    - go mod vendor
   script:
     - echo -e "\e[1;96mBuilding...\e[0m";
     - GOOS=linux GOARCH=amd64 go build -ldflags "-X main.Version=${CI_PIPELINE_IID} -linkmode external -extldflags -static -s" -o bin/${CI_PROJECT_NAME} .
@@ -83,5 +92,12 @@ build:
 
 build-docker:
   extends: .build-docker
-  needs: 
-    - build
+  needs: [build]
+  before_script:
+    - if [ ! -f ${DOCKERFILE_PATH} ]; then
+        echo "${DOCKERFILE_PATH} not exist, create one";
+        scripts/create_go_dockerfile.sh;
+      else
+        echo -e "\e[33muse local Dockerfile from ${DOCKERFILE_PATH}\e[0m";
+        if [ "${DOCKERFILE_PATH}" != "Dockerfile" ]; then cp -f ${DOCKERFILE_PATH} Dockerfile; fi;
+      fi

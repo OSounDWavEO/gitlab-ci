@@ -1,0 +1,133 @@
+include:
+  - local: jobs/sonarqube.yml
+  - local: jobs/build_docker.yml
+
+stages:
+  - test
+  - test_report
+  - build
+  - build_docker
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_REF_PROTECTED == "true"
+
+variables:
+  BUILDER_IMAGE: maven:3-eclipse-temurin-20
+  RUNNER_IMAGE: eclipse-temurin:20-jre-alpine
+  OUTPUT: target/*-SNAPSHOT.jar
+
+.builder:
+  variables:
+    MAVEN_OPTS: >-
+      -Dhttps.protocols=TLSv1.2
+      -Dmaven.repo.local=.m2/repository
+      -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=WARN
+      -Dorg.slf4j.simpleLogger.showDateTime=true
+      -Djava.awt.headless=true
+    MAVEN_CLI_OPTS: >-
+      --batch-mode
+      --errors
+      --fail-at-end
+      --show-version
+      -DinstallAtEnd=true
+      -DdeployAtEnd=true
+  before_script:
+    - 'echo "Builder image: ${BUILDER_IMAGE}"'
+    - 'echo "Java version: $(java -version)"'
+
+test:
+  stage: test
+  extends: .builder 
+  script:
+    # add plugin for test and coverage
+    - apt update
+    - apt install -y xmlstarlet
+    - xmlstarlet ed -O -P -L -N p=http://maven.apache.org/POM/4.0.0 \
+        -s "/p:project/p:build/p:plugins" -t elem -n plugin1 \
+        -s "//plugin1" -t elem -n groupId -v "org.jacoco" \
+        -s "//plugin1" -t elem -n artifactId -v "jacoco-maven-plugin" \
+        -s "//plugin1" -t elem -n executions \
+        -s "//executions" -t elem -n execution1 \
+        -s "//execution1" -t elem -n goals1 \
+        -s "//goals1" -t elem -n goal -v "prepare-agent" \
+        -s "//executions" -t elem -n execution2 \
+        -s "//execution2" -t elem -n id -v "coverage-report" \
+        -s "//execution2" -t elem -n phase -v "prepare-package" \
+        -s "//execution2" -t elem -n goals2 \
+        -s "//goals2" -t elem -n goal -v "report" \
+        -s "/p:project/p:build/p:plugins" -t elem -n plugin2 \
+        -s "//plugin2" -t elem -n groupId -v "org.apache.maven.plugins" \
+        -s "//plugin2" -t elem -n artifactId -v "maven-surefire-plugin" \
+        -r "//plugin1" -v "plugin" \
+        -r "//execution1" -v "execution" \
+        -r "//goals1" -v "goals" \
+        -r "//execution2" -v "execution" \
+        -r "//goals2" -v "goals" \
+        -r "//plugin2" -v "plugin" \
+        pom.xml
+    - echo -e "\e[1;96mTesting...\e[0m";
+    - mvn ${MAVEN_CLI_OPTS} clean test
+  artifacts:
+    when: always
+    expire_in: 1 day
+    paths:
+      - target/classes
+      - target/site/jacoco/jacoco.xml
+      - target/surefire-reports/TEST-*.xml
+    reports:
+      junit:
+        - target/surefire-reports/TEST-*.xml
+  cache:
+    - key: maven-$CI_COMMIT_REF_SLUG
+      paths:
+        - .m2/repository
+  rules:
+    - if: $DISABLE_TEST != "true"
+
+sonarqube-analysis-branch:
+  extends: .sonarqube-analysis-brnach
+  needs:
+    - job: test
+      optional: true
+
+sonarqube analysis mr:
+  extends: .sonarqube-analysis-mr
+  needs:
+    - job: test
+      optional: true
+
+build:
+  stage: build
+  extends: .builder 
+  needs:
+    - job: test
+      optional: true
+  script:
+    - rm -rf target
+    - echo -e "\e[1;96mBuilding...\e[0m";
+    - mvn -DskipTests ${MAVEN_CLI_OPTS} clean package
+  artifacts:
+    paths:
+      - target/
+    expire_in: 1 days
+  cache:
+    - key: maven-$CI_COMMIT_REF_SLUG
+      paths:
+        - .m2/repository
+      policy: pull
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "merge_request_event"
+
+build-docker:
+  extends: .build-docker
+  needs: [build]
+  before_script:
+    - if [ ! -f ${DOCKERFILE_PATH} ]; then
+        echo "${DOCKERFILE_PATH} not exist, create one";
+        scripts/create_java_dockerfile.sh;
+      else
+        echo -e "\e[33muse local Dockerfile from ${DOCKERFILE_PATH}\e[0m";
+        if [ "${DOCKERFILE_PATH}" != "Dockerfile" ]; then cp -f ${DOCKERFILE_PATH} Dockerfile; fi;
+      fi
